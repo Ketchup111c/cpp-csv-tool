@@ -84,6 +84,37 @@ bool CSVReader::readRow(Row& row) {
     return parseNextRow(row.values);
 }
 
+bool CSVReader::isRowValid(const Row& row) {
+    // 无字段（如空行）视为无效。
+    if (row.values.empty()) {
+        return false;
+    }
+    // 任一字段为空（缺失值）视为脏数据，无效。
+    for (std::size_t i = 0; i < row.values.size(); ++i) {
+        if (row.values[i].empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::size_t CSVReader::readCleanRows(std::vector<Row>& validRows,
+                                     std::size_t& filteredCount) {
+    validRows.clear();
+    filteredCount = 0;
+
+    Row row;
+    while (readRow(row)) {
+        // 有效行保留，脏数据行（全空或含空字段）计入过滤数。
+        if (isRowValid(row)) {
+            validRows.push_back(row);
+        } else {
+            ++filteredCount;
+        }
+    }
+    return validRows.size();
+}
+
 bool CSVReader::parseNextRow(std::vector<std::string>& outFields) {
     outFields.clear();
 

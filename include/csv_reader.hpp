@@ -61,6 +61,14 @@ public:
     // 到达文件末尾返回 false。
     bool readRow(Row& row);
 
+    // 读取并清洗剩余所有数据行：丢弃全空行及含空字段的脏数据行。
+    // 有效行存入 validRows，被过滤的无效行数写入 filteredCount。
+    // 返回有效行数量（validRows.size()）。
+    std::size_t readCleanRows(std::vector<Row>& validRows, std::size_t& filteredCount);
+
+    // 判断一行是否为有效数据行：至少含一个字段且所有字段均非空。
+    static bool isRowValid(const Row& row);
+
     // 获取表头映射表（未调用 readHeader 时为空）。
     const std::map<std::string, std::size_t>& headers() const;
 
