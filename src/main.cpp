@@ -76,6 +76,27 @@ int main(int argc, char* argv[]) {
         std::cout << "  总和 = " << std::fixed << std::setprecision(2) << sum
                   << std::endl;
         std::cout << "  平均值 = " << std::setprecision(4) << avg << std::endl;
+
+        // 6) 按“列名 + 关键词”筛选数据行。
+        std::string filterCol = "name";
+        std::string keyword = "e";
+        std::vector<Row> filtered;
+        CSVReader::filterRows(validRows, filterCol, keyword, filtered);
+        std::cout << std::endl
+                  << "筛选（列 \"" << filterCol << "\" 含关键词 \"" << keyword
+                  << "\"）匹配 " << filtered.size() << " 行。" << std::endl;
+
+        // 7) 将筛选结果导出为新 CSV 文件，保留原表头。
+        // CsvWriter 构造或写入失败会抛出 CsvException（文件写入异常）。
+        std::string outPath = "filtered.csv";
+        {
+            CsvWriter writer(outPath);
+            writer.writeHeader(reader.headerFields()); // 保留原表头
+            for (const auto& r : filtered) {
+                writer.writeRow(r);
+            }
+        }
+        std::cout << "已导出筛选结果至: " << outPath << std::endl;
     } catch (const CsvException& e) {
         // 捕获 CSV 自定义异常（路径非法 / 打开失败 / 列名不存在 / 空数据等）。
         std::cerr << "CSV 错误: " << e.what() << std::endl;

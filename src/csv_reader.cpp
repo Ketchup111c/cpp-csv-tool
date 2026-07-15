@@ -161,6 +161,40 @@ bool CSVReader::computeColumnStats(const std::string& colName,
     return true;
 }
 
+void CSVReader::filterRows(const std::vector<Row>& src,
+                           const std::string& colName,
+                           const std::string& keyword,
+                           std::vector<Row>& out) {
+    out.clear();
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        // 列名不存在时 Row::get 会抛出 CsvException。
+        const std::string& val = src[i].get(colName);
+        // 子串包含匹配（区分大小写）。
+        if (val.find(keyword) != std::string::npos) {
+            out.push_back(src[i]);
+        }
+    }
+}
+
+std::vector<std::string> CSVReader::headerFields() const {
+    std::vector<std::string> out;
+    if (headerMap_.empty()) {
+        return out;
+    }
+    // 依列索引顺序还原表头列名。
+    std::size_t maxIdx = 0;
+    for (const auto& kv : headerMap_) {
+        if (kv.second > maxIdx) {
+            maxIdx = kv.second;
+        }
+    }
+    out.resize(maxIdx + 1);
+    for (const auto& kv : headerMap_) {
+        out[kv.second] = kv.first;
+    }
+    return out;
+}
+
 bool CSVReader::parseNextRow(std::vector<std::string>& outFields) {
     outFields.clear();
 
@@ -240,4 +274,97 @@ const std::string& Row::get(const std::string& colName) const {
         throw CsvException("列数据缺失: " + colName);
     }
     return values[it->second];
+}
+
+// ===================== CsvWriter 实现 =====================
+
+CsvWriter::CsvWriter(const std::string& filePath)
+    : filePath_(filePath) {
+    // 先校验输出路径合法性，再尝试打开文件，错误信息更明确。
+    validatePath(filePath_);
+    file_.open(filePath_, std::ios::out | std::ios::trunc);
+    if (!file_.is_open()) {
+        throw CsvException("无法创建/写入文件（路径非法或无写权限）: " + filePath_);
+    }
+}
+
+CsvWriter::~CsvWriter() {
+    if (file_.is_open()) {
+        file_.close();
+    }
+}
+
+bool CsvWriter::isOpen() const {
+    return file_.is_open();
+}
+
+void CsvWriter::validatePath(const std::string& filePath) {
+    if (filePath.empty()) {
+        throw CsvException("输出文件路径为空（路径非法）");
+    }
+    for (char c : filePath) {
+        if (std::iscntrl(static_cast<unsigned char>(c))) {
+            throw CsvException("输出文件路径包含非法控制字符: " + filePath);
+        }
+    }
+}
+
+std::string CsvWriter::escapeField(const std::string& field) {
+    // 含逗号、双引号、换行之一，或含首尾空白时，需要加双引号包裹。
+    bool needQuote = false;
+    for (char c : field) {
+        if (c == ',' || c == '"' || c == '\n' || c == '\r') {
+            needQuote = true;
+            break;
+        }
+    }
+    if (!field.empty()) {
+        if (std::isspace(static_cast<unsigned char>(field.front())) ||
+            std::isspace(static_cast<unsigned char>(field.back()))) {
+            needQuote = true;
+        }
+    }
+    if (!needQuote) {
+        return field;
+    }
+    // 引号包裹，内部双引号转义为 ""。
+    std::string out = "\"";
+    for (char c : field) {
+        if (c == '"') {
+            out += "\"\"";
+        } else {
+            out += c;
+        }
+    }
+    out += "\"";
+    return out;
+}
+
+void CsvWriter::writeHeader(const std::vector<std::string>& header) {
+    writeRow(header);
+}
+
+void CsvWriter::writeRow(const std::vector<std::string>& fields) {
+    if (fields.empty()) {
+        file_ << '\n';
+        if (!file_.good()) {
+            throw CsvException("写入文件失败: " + filePath_);
+        }
+        return;
+    }
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (i > 0) {
+            file_ << ',';
+        }
+        file_ << escapeField(fields[i]);
+    }
+    file_ << '\n';
+    // 写入后检查流状态，捕获磁盘满等写入异常。
+    if (!file_.good()) {
+        throw CsvException("写入文件失败: " + filePath_);
+    }
+}
+
+void CsvWriter::writeRow(const Row& row) {
+    writeRow(row.values);
 }

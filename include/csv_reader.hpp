@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
 #include <stdexcept>
 #include <fstream>
 
@@ -77,6 +78,16 @@ public:
                             const std::vector<Row>& rows,
                             double& outSum, double& outAvg) const;
 
+    // 按“列名 + 关键词”筛选数据行（子串包含匹配，区分大小写）。
+    // 列名不存在时由 Row::get 抛出 CsvException。
+    static void filterRows(const std::vector<Row>& src,
+                           const std::string& colName,
+                           const std::string& keyword,
+                           std::vector<Row>& out);
+
+    // 按列索引顺序返回表头列名列表（用于导出时保留原表头）。
+    std::vector<std::string> headerFields() const;
+
     // 获取表头映射表（未调用 readHeader 时为空）。
     const std::map<std::string, std::size_t>& headers() const;
 
@@ -97,6 +108,40 @@ private:
     std::ifstream file_;                            // 文件输入流
     std::map<std::string, std::size_t> headerMap_;  // 列名 -> 列索引
     bool headerRead_;                               // 是否已读取过表头
+};
+
+// CSV 写出器：将表头与数据行按标准 CSV 规则转义后写入文件。
+// 字段含逗号、双引号、换行或首尾空白时自动加双引号包裹，
+// 字段内双引号转义为两个双引号（""）。
+class CsvWriter {
+public:
+    // 构造时打开输出文件；打开失败（路径非法/无写权限）抛出 CsvException。
+    explicit CsvWriter(const std::string& filePath);
+
+    // 析构时关闭文件流。
+    ~CsvWriter();
+
+    // 写入表头（一列名一行，逗号分隔）。
+    void writeHeader(const std::vector<std::string>& header);
+
+    // 写入一行（字段列表），自动处理引号转义。
+    void writeRow(const std::vector<std::string>& fields);
+
+    // 写入一行（来自 Row 结构体，使用其 values）。
+    void writeRow(const Row& row);
+
+    // 判断文件是否已成功打开且处于可写状态。
+    bool isOpen() const;
+
+private:
+    // 按 CSV 规则转义单个字段。
+    static std::string escapeField(const std::string& field);
+
+    // 校验输出路径是否合法（非空且不含控制字符）。
+    static void validatePath(const std::string& filePath);
+
+    std::string filePath_;   // 记录输出路径，便于异常信息
+    std::ofstream file_;     // 文件输出流
 };
 
 #endif // CSV_READER_HPP
