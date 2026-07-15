@@ -1,0 +1,13 @@
+# C++编译产物
+csv_tool
+*.o
+*.exe
+*.out
+# 临时输出文件
+output.csv
+*.tmp
+# 系统隐藏文件
+.DS_Store
+Thumbs.db
+# 测试生成临时文件
+test_data/*.csv~
