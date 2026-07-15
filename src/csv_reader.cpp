@@ -1,12 +1,12 @@
 // csv_reader.cpp
-// CSV 读取器实现：文件打开、路径校验与标准 CSV 转义解析。
+// CSV 读取器实现：文件打开、路径校验、表头解析、按列名取值与标准 CSV 转义解析。
 
 #include "csv_reader.hpp"
 
 #include <cctype>
 
 CSVReader::CSVReader(const std::string& filePath)
-    : filePath_(filePath) {
+    : filePath_(filePath), headerRead_(false) {
     // 先校验路径合法性，再尝试打开文件，错误信息更明确。
     validatePath(filePath_);
     file_.open(filePath_, std::ios::in);
@@ -25,6 +25,10 @@ bool CSVReader::isOpen() const {
     return file_.is_open();
 }
 
+const std::map<std::string, std::size_t>& CSVReader::headers() const {
+    return headerMap_;
+}
+
 void CSVReader::validatePath(const std::string& filePath) {
     // 路径为空视为非法。
     if (filePath.empty()) {
@@ -38,8 +42,50 @@ void CSVReader::validatePath(const std::string& filePath) {
     }
 }
 
-bool CSVReader::readRow(std::vector<std::string>& outRow) {
-    outRow.clear();
+std::string CSVReader::trim(const std::string& s) {
+    std::size_t begin = 0;
+    std::size_t end = s.size();
+    // 跳过首部空白字符。
+    while (begin < end && std::isspace(static_cast<unsigned char>(s[begin]))) {
+        ++begin;
+    }
+    // 跳过尾部空白字符。
+    while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+        --end;
+    }
+    return s.substr(begin, end - begin);
+}
+
+bool CSVReader::readHeader() {
+    // 已读取过表头则直接返回（避免重复读取导致跳过数据行）。
+    if (headerRead_) {
+        return !headerMap_.empty();
+    }
+
+    std::vector<std::string> fields;
+    if (!parseNextRow(fields)) {
+        headerRead_ = true;
+        return false; // 文件为空，无表头
+    }
+
+    // 建立“列名 -> 列索引”映射（重复列名以最后一次出现为准）。
+    headerMap_.clear();
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        headerMap_[fields[i]] = i;
+    }
+    headerRead_ = true;
+    return true;
+}
+
+bool CSVReader::readRow(Row& row) {
+    // 绑定表头映射并清空旧数据，再读取下一行。
+    row.header = &headerMap_;
+    row.values.clear();
+    return parseNextRow(row.values);
+}
+
+bool CSVReader::parseNextRow(std::vector<std::string>& outFields) {
+    outFields.clear();
 
     // 已到达文件末尾时直接返回 false。
     if (file_.eof()) {
@@ -72,7 +118,7 @@ bool CSVReader::readRow(std::vector<std::string>& outRow) {
             if (ch == '"') {
                 inQuotes = true;          // 进入引号字段
             } else if (ch == ',') {
-                outRow.push_back(field);  // 分隔符：结束当前字段
+                outFields.push_back(trim(field)); // 分隔符：收尾并清除首尾空格
                 field.clear();
             } else if (ch == '\n') {
                 break;                    // 普通换行：一行结束
@@ -94,6 +140,27 @@ bool CSVReader::readRow(std::vector<std::string>& outRow) {
     }
 
     // 收尾最后一个字段（含未闭合引号的情况，保持容错）。
-    outRow.push_back(field);
+    outFields.push_back(trim(field));
     return true;
+}
+
+const std::string& Row::get(std::size_t index) const {
+    if (index >= values.size()) {
+        throw CsvException("列索引越界: " + std::to_string(index));
+    }
+    return values[index];
+}
+
+const std::string& Row::get(const std::string& colName) const {
+    if (header == nullptr) {
+        throw CsvException("尚未建立表头，无法按列名取值");
+    }
+    auto it = header->find(colName);
+    if (it == header->end()) {
+        throw CsvException("列名不存在: " + colName);
+    }
+    if (it->second >= values.size()) {
+        throw CsvException("列数据缺失: " + colName);
+    }
+    return values[it->second];
 }

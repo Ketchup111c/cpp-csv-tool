@@ -4,3 +4,4 @@ id,name,note
 3,Charlie,"第一行
 第二行"
 4,Dave,普通字段
+5,  Eve  , "  带首尾空格的引用字段  "

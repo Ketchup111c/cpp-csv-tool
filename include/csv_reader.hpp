@@ -1,5 +1,5 @@
 // csv_reader.hpp
-// CSV 读取器头文件：定义 CSV 异常类型与 CSVReader 类。
+// CSV 读取器头文件：定义 CSV 异常类型、Row 单行结构体与 CSVReader 类。
 // 仅依赖 C++ 标准库，符合 C++11 标准，可在 Linux g++ 下编译。
 
 #ifndef CSV_READER_HPP
@@ -7,18 +7,41 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <stdexcept>
 #include <fstream>
 
-// CSV 自定义异常：用于统一表达文件打开失败、路径非法等错误。
+// CSV 自定义异常：用于统一表达文件打开失败、路径非法、列名不存在等错误。
 class CsvException : public std::runtime_error {
 public:
     explicit CsvException(const std::string& message)
         : std::runtime_error(message) {}
 };
 
-// CSV 读取器：逐行读取 CSV 文件，并解析标准 CSV 转义规则。
-// 支持字段内包含逗号、双引号（用两个双引号 "" 转义）以及换行。
+// 单行数据：保存本行各字段取值，并通过表头映射支持“按列名取值”。
+struct Row {
+    // 指向 CSVReader 维护的“列名 -> 列索引”映射表（不拥有该资源）。
+    const std::map<std::string, std::size_t>* header;
+
+    // 本行各字段内容（顺序与 CSV 列一致）。
+    std::vector<std::string> values;
+
+    // 构造时绑定表头映射（可为 nullptr，此时按列名取值会抛异常）。
+    Row() : header(nullptr) {}
+    explicit Row(const std::map<std::string, std::size_t>* h) : header(h) {}
+
+    // 字段个数。
+    std::size_t size() const { return values.size(); }
+
+    // 按列索引获取字段；索引越界抛 CsvException。
+    const std::string& get(std::size_t index) const;
+
+    // 按列名获取字段；未建立表头或列名不存在时抛 CsvException。
+    const std::string& get(const std::string& colName) const;
+};
+
+// CSV 读取器：逐行读取 CSV 文件，解析标准 CSV 转义规则，
+// 支持将首行作为表头建立列名映射，并清除字段首尾空白。
 class CSVReader {
 public:
     // 构造时打开文件。
@@ -29,20 +52,35 @@ public:
     // 析构时关闭文件流。
     ~CSVReader();
 
-    // 读取下一行并解析为字段列表。
-    // 成功读取到一行返回 true，并将结果写入 outRow；
+    // 读取第一行作为表头，建立“列名 -> 列索引”映射表。
+    // 读取成功（至少读到一行）返回 true；文件为空返回 false。
+    // 可重复调用：第二次起直接返回是否曾成功读取过表头。
+    bool readHeader();
+
+    // 读取下一行数据并填充到 row（不含表头行）。
     // 到达文件末尾返回 false。
-    bool readRow(std::vector<std::string>& outRow);
+    bool readRow(Row& row);
+
+    // 获取表头映射表（未调用 readHeader 时为空）。
+    const std::map<std::string, std::size_t>& headers() const;
 
     // 判断文件是否已成功打开且处于可读状态。
     bool isOpen() const;
 
 private:
+    // 核心状态机：读取一行（含字段内换行）并拆分为字段列表。
+    bool parseNextRow(std::vector<std::string>& outFields);
+
+    // 去除字符串首尾空白字符（空格、制表符等）。
+    static std::string trim(const std::string& s);
+
     // 校验路径是否合法（非空且不含控制字符）。
     static void validatePath(const std::string& filePath);
 
-    std::string filePath_;   // 记录文件路径，便于异常信息输出
-    std::ifstream file_;     // 文件输入流
+    std::string filePath_;                          // 记录文件路径，便于异常信息
+    std::ifstream file_;                            // 文件输入流
+    std::map<std::string, std::size_t> headerMap_;  // 列名 -> 列索引
+    bool headerRead_;                               // 是否已读取过表头
 };
 
 #endif // CSV_READER_HPP
