@@ -85,6 +85,11 @@ public:
                            const std::string& keyword,
                            std::vector<Row>& out);
 
+    // 按关键词筛选数据行：任意列包含该关键词即匹配（区分大小写）。
+    static void filterRowsAnyColumn(const std::vector<Row>& src,
+                                    const std::string& keyword,
+                                    std::vector<Row>& out);
+
     // 按列索引顺序返回表头列名列表（用于导出时保留原表头）。
     std::vector<std::string> headerFields() const;
 

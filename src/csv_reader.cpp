@@ -176,6 +176,24 @@ void CSVReader::filterRows(const std::vector<Row>& src,
     }
 }
 
+void CSVReader::filterRowsAnyColumn(const std::vector<Row>& src,
+                                    const std::string& keyword,
+                                    std::vector<Row>& out) {
+    out.clear();
+    for (const auto& r : src) {
+        bool hit = false;
+        for (std::size_t i = 0; i < r.values.size(); ++i) {
+            if (r.values[i].find(keyword) != std::string::npos) {
+                hit = true;
+                break;
+            }
+        }
+        if (hit) {
+            out.push_back(r);
+        }
+    }
+}
+
 std::vector<std::string> CSVReader::headerFields() const {
     std::vector<std::string> out;
     if (headerMap_.empty()) {
