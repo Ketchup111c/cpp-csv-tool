@@ -1,17 +1,24 @@
 // csv_reader.cpp
-// CSV 读取器实现：文件打开、路径校验、表头解析、按列名取值与标准 CSV 转义解析。
+// CSV 读取/写出实现：文件打开、路径校验、UTF-8 与行列校验、表头解析、
+// 按列名取值、流式统计/筛选原语，以及标准 CSV 引号转义写出。
 
 #include "csv_reader.hpp"
 
 #include <cctype>
 
+// ===================== CSVReader 实现 =====================
+
 CSVReader::CSVReader(const std::string& filePath)
-    : filePath_(filePath), headerRead_(false) {
-    // 先校验路径合法性，再尝试打开文件，错误信息更明确。
+    : filePath_(filePath),
+      headerColCount_(0),
+      headerRead_(false),
+      dataRowIndex_(0) {
     validatePath(filePath_);
-    file_.open(filePath_, std::ios::in);
+    // 以二进制模式打开，避免平台相关换行翻译干扰解析。
+    headerMap_ = std::make_shared<HeaderMap>();
+    file_.open(filePath_, std::ios::in | std::ios::binary);
     if (!file_.is_open()) {
-        throw CsvException("无法打开文件（可能不存在或无访问权限）: " + filePath_);
+        throw CsvIoException("无法打开文件（路径非法或无访问权限）: " + filePath_);
     }
 }
 
@@ -25,19 +32,17 @@ bool CSVReader::isOpen() const {
     return file_.is_open();
 }
 
-const std::map<std::string, std::size_t>& CSVReader::headers() const {
-    return headerMap_;
+const CSVReader::HeaderMap& CSVReader::headers() const {
+    return *headerMap_;
 }
 
 void CSVReader::validatePath(const std::string& filePath) {
-    // 路径为空视为非法。
     if (filePath.empty()) {
-        throw CsvException("文件路径为空（路径非法）");
+        throw CsvIoException("文件路径为空（路径非法）");
     }
-    // 路径中包含 ASCII 控制字符（如 '\0'）视为非法。
     for (char c : filePath) {
         if (std::iscntrl(static_cast<unsigned char>(c))) {
-            throw CsvException("文件路径包含非法控制字符: " + filePath);
+            throw CsvIoException("文件路径包含非法控制字符: " + filePath);
         }
     }
 }
@@ -45,51 +50,115 @@ void CSVReader::validatePath(const std::string& filePath) {
 std::string CSVReader::trim(const std::string& s) {
     std::size_t begin = 0;
     std::size_t end = s.size();
-    // 跳过首部空白字符。
     while (begin < end && std::isspace(static_cast<unsigned char>(s[begin]))) {
         ++begin;
     }
-    // 跳过尾部空白字符。
     while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
         --end;
     }
     return s.substr(begin, end - begin);
 }
 
-bool CSVReader::readHeader() {
-    // 已读取过表头则直接返回（避免重复读取导致跳过数据行）。
-    if (headerRead_) {
-        return !headerMap_.empty();
+bool CSVReader::isValidUtf8(const std::string& s) {
+    std::size_t i = 0;
+    const std::size_t n = s.size();
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) {
+            ++i; // ASCII
+        } else if ((c >> 5) == 0x06) { // 110xxxxx，2 字节
+            if (i + 1 >= n || (s[i + 1] & 0xC0) != 0x80) return false;
+            i += 2;
+        } else if ((c >> 4) == 0x0E) { // 1110xxxx，3 字节
+            if (i + 2 >= n || (s[i + 1] & 0xC0) != 0x80 ||
+                (s[i + 2] & 0xC0) != 0x80) {
+                return false;
+            }
+            i += 3;
+        } else if ((c >> 3) == 0x1E) { // 11110xxx，4 字节
+            if (i + 3 >= n || (s[i + 1] & 0xC0) != 0x80 ||
+                (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80) {
+                return false;
+            }
+            i += 4;
+        } else {
+            return false; // 非法前导字节
+        }
     }
+    return true;
+}
 
+void CSVReader::stripBom(std::string& s) {
+    const char bom[3] = {'\xEF', '\xBB', '\xBF'};
+    if (s.size() >= 3 && s[0] == bom[0] && s[1] == bom[1] && s[2] == bom[2]) {
+        s.erase(0, 3);
+    }
+}
+
+bool CSVReader::readHeader() {
+    if (headerRead_) {
+        return !headerMap_->empty();
+    }
     std::vector<std::string> fields;
     if (!parseNextRow(fields)) {
         headerRead_ = true;
         return false; // 文件为空，无表头
     }
-
-    // 建立“列名 -> 列索引”映射（重复列名以最后一次出现为准）。
-    headerMap_.clear();
-    for (std::size_t i = 0; i < fields.size(); ++i) {
-        headerMap_[fields[i]] = i;
+    // 去除文件起始处的 UTF-8 BOM，避免污染首列表头名。
+    if (!fields.empty()) {
+        stripBom(fields[0]);
     }
+    headerMap_->clear();
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        (*headerMap_)[fields[i]] = i;
+    }
+    headerColCount_ = fields.size();
     headerRead_ = true;
     return true;
 }
 
 bool CSVReader::readRow(Row& row) {
-    // 绑定表头映射并清空旧数据，再读取下一行。
-    row.header = &headerMap_;
+    // 绑定共享表头，清空旧数据，再流式读取下一行。
+    row.header = headerMap_;
     row.values.clear();
-    return parseNextRow(row.values);
+    if (!parseNextRow(row.values)) {
+        return false;
+    }
+    ++dataRowIndex_;
+
+    // 编码校验：每个字段必须是合法 UTF-8。
+    for (std::size_t i = 0; i < row.values.size(); ++i) {
+        if (!isValidUtf8(row.values[i])) {
+            throw CsvEncodingException(
+                "第 " + std::to_string(dataRowIndex_) +
+                " 行含非法 UTF-8 编码字段（索引 " + std::to_string(i) + "）");
+        }
+    }
+
+    // 行列一致性校验：数据行列数须与表头一致。
+    // 但完全空白行（无字段或全为空字段）视为无效脏数据，交由 isRowValid
+    // 过滤，不按行列不匹配处理，以容忍文件中常见的空行。
+    bool blank = true;
+    for (std::size_t i = 0; i < row.values.size(); ++i) {
+        if (!row.values[i].empty()) {
+            blank = false;
+            break;
+        }
+    }
+    if (!blank && headerRead_ && headerColCount_ > 0 &&
+        row.values.size() != headerColCount_) {
+        throw CsvColumnMismatchException(
+            "第 " + std::to_string(dataRowIndex_) + " 行列数不匹配：期望 " +
+            std::to_string(headerColCount_) + " 列，实际 " +
+            std::to_string(row.values.size()) + " 列");
+    }
+    return true;
 }
 
 bool CSVReader::isRowValid(const Row& row) {
-    // 无字段（如空行）视为无效。
     if (row.values.empty()) {
         return false;
     }
-    // 任一字段为空（缺失值）视为脏数据，无效。
     for (std::size_t i = 0; i < row.values.size(); ++i) {
         if (row.values[i].empty()) {
             return false;
@@ -98,131 +167,61 @@ bool CSVReader::isRowValid(const Row& row) {
     return true;
 }
 
-std::size_t CSVReader::readCleanRows(std::vector<Row>& validRows,
-                                     std::size_t& filteredCount) {
-    validRows.clear();
-    filteredCount = 0;
-
-    Row row;
-    while (readRow(row)) {
-        // 有效行保留，脏数据行（全空或含空字段）计入过滤数。
-        if (isRowValid(row)) {
-            validRows.push_back(row);
-        } else {
-            ++filteredCount;
+bool CSVReader::rowMatchesKeyword(const Row& row, const std::string& keyword) {
+    for (std::size_t i = 0; i < row.values.size(); ++i) {
+        if (row.values[i].find(keyword) != std::string::npos) {
+            return true;
         }
     }
-    return validRows.size();
+    return false;
 }
 
-bool CSVReader::computeColumnStats(const std::string& colName,
-                                   const std::vector<Row>& rows,
-                                   double& outSum, double& outAvg) const {
-    // 校验列名是否在表头中存在。
-    if (headerMap_.find(colName) == headerMap_.end()) {
-        throw CsvException("列名不存在，无法统计: " + colName);
+double CSVReader::parseDouble(const std::string& raw, std::size_t rowIdx,
+                              const std::string& colName) {
+    std::size_t pos = 0;
+    double val = 0.0;
+    try {
+        // stod 可能因非数字内容抛 invalid_argument / out_of_range。
+        val = std::stod(raw, &pos);
+    } catch (const std::exception& e) {
+        throw CsvFormatException(
+            "第 " + std::to_string(rowIdx) + " 行数值解析失败（非数字/乱码字段）[" +
+            colName + "] = \"" + raw + "\": " + e.what());
     }
-    // 无有效数据时不允许统计，避免对空数据做除法。
-    if (rows.empty()) {
-        throw CsvException("无有效数据，无法统计列: " + colName);
+    // 整串未被完全消费（如 "12abc"），视为含非数值内容。
+    if (pos != raw.size()) {
+        throw CsvFormatException("第 " + std::to_string(rowIdx) +
+                                 " 行含非数值内容 [" + colName + "] = \"" +
+                                 raw + "\"");
     }
-
-    double sum = 0.0;
-    std::size_t numericCount = 0;
-
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-        const std::string& raw = rows[i].get(colName);
-
-        std::size_t pos = 0;
-        double val = 0.0;
-        try {
-            // 严格解析：stod 可能因非数字内容抛 invalid_argument / out_of_range。
-            val = std::stod(raw, &pos);
-        } catch (const std::exception& e) {
-            throw CsvException("第 " + std::to_string(i + 1) +
-                               " 行数值解析失败（非数字/乱码字段）[" +
-                               colName + "] = \"" + raw + "\": " + e.what());
-        }
-        // 若整串未被完全消费（如 "12abc"），视为含有非数值内容。
-        if (pos != raw.size()) {
-            throw CsvException("第 " + std::to_string(i + 1) +
-                               " 行含非数值内容 [" + colName +
-                               "] = \"" + raw + "\"");
-        }
-
-        sum += val;
-        ++numericCount;
-    }
-
-    outSum = sum;
-    outAvg = (numericCount > 0)
-                 ? (sum / static_cast<double>(numericCount))
-                 : 0.0;
-    return true;
-}
-
-void CSVReader::filterRows(const std::vector<Row>& src,
-                           const std::string& colName,
-                           const std::string& keyword,
-                           std::vector<Row>& out) {
-    out.clear();
-    for (std::size_t i = 0; i < src.size(); ++i) {
-        // 列名不存在时 Row::get 会抛出 CsvException。
-        const std::string& val = src[i].get(colName);
-        // 子串包含匹配（区分大小写）。
-        if (val.find(keyword) != std::string::npos) {
-            out.push_back(src[i]);
-        }
-    }
-}
-
-void CSVReader::filterRowsAnyColumn(const std::vector<Row>& src,
-                                    const std::string& keyword,
-                                    std::vector<Row>& out) {
-    out.clear();
-    for (const auto& r : src) {
-        bool hit = false;
-        for (std::size_t i = 0; i < r.values.size(); ++i) {
-            if (r.values[i].find(keyword) != std::string::npos) {
-                hit = true;
-                break;
-            }
-        }
-        if (hit) {
-            out.push_back(r);
-        }
-    }
+    return val;
 }
 
 std::vector<std::string> CSVReader::headerFields() const {
     std::vector<std::string> out;
-    if (headerMap_.empty()) {
+    if (headerMap_->empty()) {
         return out;
     }
-    // 依列索引顺序还原表头列名。
     std::size_t maxIdx = 0;
-    for (const auto& kv : headerMap_) {
+    for (const auto& kv : *headerMap_) {
         if (kv.second > maxIdx) {
             maxIdx = kv.second;
         }
     }
     out.resize(maxIdx + 1);
-    for (const auto& kv : headerMap_) {
+    for (const auto& kv : *headerMap_) {
         out[kv.second] = kv.first;
     }
     return out;
 }
 
+// 核心状态机：逐字符读取一行（含字段内换行），拆分为字段列表并 trim。
 bool CSVReader::parseNextRow(std::vector<std::string>& outFields) {
     outFields.clear();
-
-    // 已到达文件末尾时直接返回 false。
     if (file_.eof()) {
         return false;
     }
 
-    // 状态机逐字符解析一行（含字段内换行），直接生成字段列表。
-    // 状态：inQuotes 表示当前处于引号字段内。
     bool inQuotes = false;
     bool rowStarted = false;
     std::string field;
@@ -230,29 +229,26 @@ bool CSVReader::parseNextRow(std::vector<std::string>& outFields) {
 
     while (file_.get(ch)) {
         rowStarted = true;
-
         if (inQuotes) {
             if (ch == '"') {
-                // 引号字段内：若后为另一个引号，则为转义引号 ""。
                 if (file_.peek() == '"') {
-                    field.push_back('"'); // 写入单个引号
+                    field.push_back('"'); // 转义引号 ""
                     file_.get(ch);        // 消费第二个引号
                 } else {
-                    inQuotes = false;     // 否则为字段结束引号
+                    inQuotes = false;     // 字段结束引号
                 }
             } else {
                 field.push_back(ch);      // 引号内字符原样保留（含换行）
             }
         } else {
             if (ch == '"') {
-                inQuotes = true;          // 进入引号字段
+                inQuotes = true;
             } else if (ch == ',') {
-                outFields.push_back(trim(field)); // 分隔符：收尾并清除首尾空格
+                outFields.push_back(trim(field));
                 field.clear();
             } else if (ch == '\n') {
-                break;                    // 普通换行：一行结束
+                break;
             } else if (ch == '\r') {
-                // 兼容 Windows 行尾 \r\n：忽略 \r，遇 \n 结束。
                 if (file_.peek() == '\n') {
                     file_.get(ch);
                 }
@@ -263,12 +259,9 @@ bool CSVReader::parseNextRow(std::vector<std::string>& outFields) {
         }
     }
 
-    // 空文件或末尾无内容时返回 false。
     if (!rowStarted && file_.eof()) {
         return false;
     }
-
-    // 收尾最后一个字段（含未闭合引号的情况，保持容错）。
     outFields.push_back(trim(field));
     return true;
 }
@@ -281,28 +274,27 @@ const std::string& Row::get(std::size_t index) const {
 }
 
 const std::string& Row::get(const std::string& colName) const {
-    if (header == nullptr) {
+    if (!header) {
         throw CsvException("尚未建立表头，无法按列名取值");
     }
     auto it = header->find(colName);
     if (it == header->end()) {
-        throw CsvException("列名不存在: " + colName);
+        throw CsvFormatException("列名不存在: " + colName);
     }
     if (it->second >= values.size()) {
-        throw CsvException("列数据缺失: " + colName);
+        throw CsvColumnMismatchException("列数据缺失: " + colName);
     }
     return values[it->second];
 }
 
 // ===================== CsvWriter 实现 =====================
 
-CsvWriter::CsvWriter(const std::string& filePath)
-    : filePath_(filePath) {
-    // 先校验输出路径合法性，再尝试打开文件，错误信息更明确。
+CsvWriter::CsvWriter(const std::string& filePath) : filePath_(filePath) {
     validatePath(filePath_);
     file_.open(filePath_, std::ios::out | std::ios::trunc);
     if (!file_.is_open()) {
-        throw CsvException("无法创建/写入文件（路径非法或无写权限）: " + filePath_);
+        throw CsvIoException(
+            "无法创建/写入文件（路径非法或无写权限）: " + filePath_);
     }
 }
 
@@ -318,17 +310,16 @@ bool CsvWriter::isOpen() const {
 
 void CsvWriter::validatePath(const std::string& filePath) {
     if (filePath.empty()) {
-        throw CsvException("输出文件路径为空（路径非法）");
+        throw CsvIoException("输出文件路径为空（路径非法）");
     }
     for (char c : filePath) {
         if (std::iscntrl(static_cast<unsigned char>(c))) {
-            throw CsvException("输出文件路径包含非法控制字符: " + filePath);
+            throw CsvIoException("输出文件路径包含非法控制字符: " + filePath);
         }
     }
 }
 
 std::string CsvWriter::escapeField(const std::string& field) {
-    // 含逗号、双引号、换行之一，或含首尾空白时，需要加双引号包裹。
     bool needQuote = false;
     for (char c : field) {
         if (c == ',' || c == '"' || c == '\n' || c == '\r') {
@@ -366,7 +357,7 @@ void CsvWriter::writeRow(const std::vector<std::string>& fields) {
     if (fields.empty()) {
         file_ << '\n';
         if (!file_.good()) {
-            throw CsvException("写入文件失败: " + filePath_);
+            throw CsvIoException("写入文件失败: " + filePath_);
         }
         return;
     }
@@ -377,9 +368,8 @@ void CsvWriter::writeRow(const std::vector<std::string>& fields) {
         file_ << escapeField(fields[i]);
     }
     file_ << '\n';
-    // 写入后检查流状态，捕获磁盘满等写入异常。
     if (!file_.good()) {
-        throw CsvException("写入文件失败: " + filePath_);
+        throw CsvIoException("写入文件失败: " + filePath_);
     }
 }
 

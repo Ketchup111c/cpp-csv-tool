@@ -16,3 +16,12 @@ set(SOURCES
 
 # 生成可执行文件。
 add_executable(csv_tool ${SOURCES})
+
+# 边界/异常用例测试。
+add_executable(csv_tool_test
+    tests/test_edge.cpp
+    src/csv_reader.cpp
+)
+
+enable_testing()
+add_test(NAME edge_tests COMMAND csv_tool_test)
