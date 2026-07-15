@@ -115,6 +115,52 @@ std::size_t CSVReader::readCleanRows(std::vector<Row>& validRows,
     return validRows.size();
 }
 
+bool CSVReader::computeColumnStats(const std::string& colName,
+                                   const std::vector<Row>& rows,
+                                   double& outSum, double& outAvg) const {
+    // 校验列名是否在表头中存在。
+    if (headerMap_.find(colName) == headerMap_.end()) {
+        throw CsvException("列名不存在，无法统计: " + colName);
+    }
+    // 无有效数据时不允许统计，避免对空数据做除法。
+    if (rows.empty()) {
+        throw CsvException("无有效数据，无法统计列: " + colName);
+    }
+
+    double sum = 0.0;
+    std::size_t numericCount = 0;
+
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const std::string& raw = rows[i].get(colName);
+
+        std::size_t pos = 0;
+        double val = 0.0;
+        try {
+            // 严格解析：stod 可能因非数字内容抛 invalid_argument / out_of_range。
+            val = std::stod(raw, &pos);
+        } catch (const std::exception& e) {
+            throw CsvException("第 " + std::to_string(i + 1) +
+                               " 行数值解析失败（非数字/乱码字段）[" +
+                               colName + "] = \"" + raw + "\": " + e.what());
+        }
+        // 若整串未被完全消费（如 "12abc"），视为含有非数值内容。
+        if (pos != raw.size()) {
+            throw CsvException("第 " + std::to_string(i + 1) +
+                               " 行含非数值内容 [" + colName +
+                               "] = \"" + raw + "\"");
+        }
+
+        sum += val;
+        ++numericCount;
+    }
+
+    outSum = sum;
+    outAvg = (numericCount > 0)
+                 ? (sum / static_cast<double>(numericCount))
+                 : 0.0;
+    return true;
+}
+
 bool CSVReader::parseNextRow(std::vector<std::string>& outFields) {
     outFields.clear();
 

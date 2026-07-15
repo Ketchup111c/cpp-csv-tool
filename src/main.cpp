@@ -1,8 +1,9 @@
 // main.cpp
-// CSV 工具演示入口：读取表头、清洗脏数据、统计过滤行数，并演示异常安全统计。
+// CSV 工具演示入口：读取表头、清洗脏数据、统计过滤行数，并演示数值列统计。
 
 #include "csv_reader.hpp"
 
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -62,6 +63,19 @@ int main(int argc, char* argv[]) {
         std::cout << std::endl
                   << "统计：有效行 " << validRows.size()
                   << " 行，字段合计 " << totalFields << " 个。" << std::endl;
+
+        // 5) 数值统计：对指定数值列遍历有效数据行，求总和与平均值。
+        // 非数字/乱码字段会在内部被捕获并转换为 CsvException 抛出，防止崩溃。
+        std::string statCol = "id";
+        double sum = 0.0, avg = 0.0;
+        reader.computeColumnStats(statCol, validRows, sum, avg);
+
+        std::cout << std::endl;
+        std::cout << "数值统计（列 \"" << statCol << "\"）:" << std::endl;
+        std::cout << "  行数 = " << validRows.size() << std::endl;
+        std::cout << "  总和 = " << std::fixed << std::setprecision(2) << sum
+                  << std::endl;
+        std::cout << "  平均值 = " << std::setprecision(4) << avg << std::endl;
     } catch (const CsvException& e) {
         // 捕获 CSV 自定义异常（路径非法 / 打开失败 / 列名不存在 / 空数据等）。
         std::cerr << "CSV 错误: " << e.what() << std::endl;

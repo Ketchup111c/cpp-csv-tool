@@ -69,6 +69,14 @@ public:
     // 判断一行是否为有效数据行：至少含一个字段且所有字段均非空。
     static bool isRowValid(const Row& row);
 
+    // 对指定数值列遍历有效数据行，计算总和与平均值。
+    // rows 为已清洗的有效数据；colName 需存在于表头。
+    // 成功时通过 outSum / outAvg 输出结果并返回 true。
+    // 列名不存在、无有效数据、或字段非数字/含乱码时抛出 CsvException。
+    bool computeColumnStats(const std::string& colName,
+                            const std::vector<Row>& rows,
+                            double& outSum, double& outAvg) const;
+
     // 获取表头映射表（未调用 readHeader 时为空）。
     const std::map<std::string, std::size_t>& headers() const;
 
